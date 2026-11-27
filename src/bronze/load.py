@@ -21,6 +21,7 @@ from psycopg.types.json import Jsonb
 
 from src.bronze.schema import create_bronze_schema
 from src.common.checksum import file_checksum
+from src.storage.partitions import ensure_partition
 
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -131,6 +132,8 @@ def load_file(
         )
         for ev in events
     ]
+    if source_date is not None:
+        ensure_partition(conn, "bronze.meter_events_raw", source_date)
     with conn.cursor() as cur:
         cur.executemany(
             "INSERT INTO bronze.meter_events_raw "

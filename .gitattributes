@@ -1,0 +1,5 @@
+# Files executed inside Linux containers must keep LF endings, even on Windows
+# clones with core.autocrlf=true (CRLF breaks bash: "set: pipefail: invalid option").
+*.sh   text eol=lf
+*.sql  text eol=lf
+*.py   text eol=lf

@@ -16,6 +16,7 @@ import psycopg
 from src.ref.dim_meter import fetch_meters
 from src.silver.normalise import DayResult, normalise_day
 from src.silver.schema import create_silver_schema
+from src.storage.partitions import ensure_partitions
 
 # Candidates for day D: anything landed D-1..D+1 (covers tz offsets around
 # midnight) plus late files whose ts text starts with D. Final filter is the
@@ -83,6 +84,13 @@ def _write(
     bad_files: list[tuple],
     run_id: str,
 ) -> None:
+    ensure_partitions(
+        conn, "silver.meter_readings", [day] + [r.reading_date for r in res.readings]
+    )
+    ensure_partitions(
+        conn, "silver.quarantine", [day] + [q.reading_date for q in res.quarantine]
+    )
+    ensure_partitions(conn, "silver.gaps", [day] + [g.reading_date for g in res.gaps])
     with conn.cursor() as cur:
         for t in ("meter_readings", "quarantine", "gaps"):
             cur.execute(f"DELETE FROM silver.{t} WHERE reading_date = %s", (day,))

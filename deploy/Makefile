@@ -1,7 +1,7 @@
 # GridPulse one-command interface. Included from the root Makefile, so all
 # paths are relative to the repo root. Requires Docker Desktop + GNU make.
 # (Windows without make: run the docker compose commands in docs/runbook.md §1.)
-.PHONY: up down nuke schemas ps logs seed run test backfill fmt lint
+.PHONY: up down nuke schemas ps logs seed run test backfill compact retention health dag-test airflow-backfill dashboard fmt lint
 
 COMPOSE := docker compose -f deploy/docker-compose.yml
 
@@ -44,11 +44,31 @@ run:               ## run the pipeline end to end for one day
 backfill:           ## make backfill DATE_FROM=... DATE_TO=...
 	python -m src.pipeline backfill --date-from $(DATE_FROM) --date-to $(DATE_TO)
 
+compact:            ## VACUUM+REINDEX partitions: make compact DATE_FROM=... DATE_TO=...
+	python -m src.storage.maintenance compact --date-from $(DATE_FROM) --date-to $(DATE_TO)
+
+retention:          ## drop expired partitions: make retention [AS_OF=YYYY-MM-DD] [DRY_RUN=1]
+	python -m src.storage.maintenance retention $(if $(AS_OF),--as-of $(AS_OF)) $(if $(DRY_RUN),--dry-run)
+
+health:             ## serve GET /health on :8000 (HEALTH_PORT) — Ctrl-C to stop
+	python -m src.observability.health
+
+dag-test:           ## run the Airflow DAG once in-process: make dag-test DATE=2025-09-03
+	$(COMPOSE) exec -T airflow-scheduler airflow dags test gridpulse_pipeline $(DATE)
+
+airflow-backfill:   ## Airflow backfill, dates in order: make airflow-backfill DATE_FROM=... DATE_TO=...
+	$(COMPOSE) exec -T airflow-scheduler airflow backfill create --dag-id gridpulse_pipeline \
+		--from-date $(DATE_FROM) --to-date $(DATE_TO) --max-active-runs 1 --reprocess-behavior completed
+
+dashboard:          ## mart.* views + provision/refresh the Superset "GridPulse" dashboard (idempotent)
+	python -m src.marts.views
+	python deploy/superset/provision_dashboard.py --verify
+
 test:               ## run every test
-	pytest -q
+	python -m pytest -q
 
 fmt:                ## auto-format
-	black src tests scripts && ruff check --fix src tests scripts
+	python -m black src tests scripts && python -m ruff check --fix src tests scripts
 
 lint:               ## check formatting + lint (what CI runs)
-	ruff check src tests scripts && black --check src tests scripts
+	python -m ruff check src tests scripts && python -m black --check src tests scripts
