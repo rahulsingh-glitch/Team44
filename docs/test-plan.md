@@ -158,6 +158,58 @@ Feature code is not modified.
 | V71 | Backfill range | `test_backfill_of_date_range_is_idempotent` | fingerprint unchanged |
 | V72 | Late re-delivered copy | `test_rerun_after_redelivered_copy_adds_no_silver_rows` | fingerprint unchanged |
 
+## Layer 4 — Consumption (`tests/test_consumption.py`, 25 cases, all green)
+Two throwaway DBs (`lakehouse` untouched; skipped if the warehouse is down). Feature code not modified.
+- **A. Seed** — generator → real `pipeline.run` → gold; asserts reconciliation + planted defects.
+- **B. Crafted** — rows written straight into `ref.dim_meter` + `silver.meter_readings`, then
+  `build_gold_date`; covers what the 3-day seed cannot (full month, silent / not-yet-installed
+  meter, 90 % boundary, UTC hour bucket, replace-not-append).
+
+### Reconciliation (kWh carried exactly, no double count)
+| ID | Rule | Test name | Expected |
+|---|---|---|---|
+| G1 | Hourly = silver | `test_hourly_kwh_equals_silver_kwh_per_meter_per_day` | kWh + interval count match per meter-day |
+| G2 | Daily = Σ hourly | `test_daily_kwh_equals_sum_of_hourly_per_meter` | no mismatch |
+| G3 | Monthly = Σ daily | `test_monthly_billing_kwh_equals_sum_of_daily_per_meter` | no mismatch; 60 billing rows |
+| G4 | Roll-ups = meter level | `test_feeder_and_zone_views_equal_meter_level_totals` | 4 views equal meter-grain sums |
+| G5 | One row per meter-day | `test_every_installed_meter_has_one_daily_row_per_processed_day` | 60 × 3 days |
+
+### Defects in gold (gaps marked, never filled — CLAUDE.md §4)
+| ID | Rule | Test name | Expected |
+|---|---|---|---|
+| G6 | Gap day incomplete, not filled | `test_gap_day_is_marked_incomplete_and_missing_intervals_are_not_filled` | M00003 80/96, 83.33 %, is_complete=false, kWh = silver |
+| G7 | Gap hours absent | `test_gap_hours_have_no_hourly_rows_and_edge_hours_keep_partial_counts` | no 08–10 rows; 07 & 11 = 2 intervals |
+| G8 | Outage hours absent | `test_feeder_outage_hours_have_no_hourly_rows_for_any_meter_on_feeder` | F04 no 08/09 rows; 10:00 hour = 3 intervals × 15 meters |
+| G9 | Duplicates not double counted | `test_duplicate_readings_are_not_double_counted_in_gold` | M00001 96/96; max 4 intervals/hour |
+| G10 | Quarantined slot not billed | `test_quarantined_reading_carries_no_billable_kwh` | M00005, M00006 = 95; no negative kWh |
+| G11 | Unknown meter excluded | `test_unknown_meter_is_absent_from_every_gold_table` | 0 rows in 3 tables |
+| G12 | No double unit conversion | `test_kwh_reporting_meters_are_not_double_converted_in_gold` | Wh/kWh meter mean ratio within 0.1–10 (1000× ⇒ fail) |
+| G13 | UTC hour buckets | `test_hour_buckets_are_utc_hour_aligned_and_on_their_reading_date` | 0 misaligned |
+| G14 | Partial month | `test_partial_month_is_open_month_with_expected_based_on_processed_days` | all OPEN_MONTH, 3/30 days, expected 288 |
+
+### Billing status (crafted full month, Sept 2030)
+| ID | Rule | Test name | Expected |
+|---|---|---|---|
+| G15 | > 90 % full month ⇒ BILLABLE | `test_full_month_above_90_pct_is_billable_with_exact_kwh` | 720.000000 kWh, 100 %, 30/30 days |
+| G16 | ≤ 90 % ⇒ LOW_COMPLETENESS, no estimate | `test_full_month_at_or_below_90_pct_is_low_completeness_not_estimated` | 600.000000 kWh (measured only), 83.33 % |
+| G17 | Open until all days processed | `test_month_is_open_until_every_day_is_processed` | after 29/30 days both OPEN_MONTH |
+
+### Edge cases (crafted)
+| ID | Rule | Test name | Expected |
+|---|---|---|---|
+| G18 | Outage ≠ 0 kWh | `test_meter_with_no_readings_has_daily_row_with_null_energy_not_zero` | energy NULL, 0 %, no hourly rows |
+| G19 | Not yet installed | `test_meter_installed_after_date_gets_no_daily_row` | 0 rows |
+| G20 | Complete is strictly > 90 % | `test_completeness_flag_requires_strictly_more_than_90_pct` | 86 = 89.58 % false; 87 = 90.63 % true |
+| G21 | 23:45 UTC bucket | `test_reading_at_2345_utc_lands_in_hour_23_of_the_same_utc_date` | hour 23:00Z, same date |
+
+### Idempotency (T2 — the most-tested Track B failure)
+| ID | Rule | Test name | Expected |
+|---|---|---|---|
+| G22 | Re-run one date | `test_rerun_of_one_date_is_idempotent_for_gold` | gold md5 unchanged |
+| G23 | Backfill range | `test_backfill_of_date_range_is_idempotent_for_gold` | md5 + row counts unchanged |
+| G24 | Re-run replaces, not appends | `test_rerun_after_silver_change_replaces_rows_instead_of_appending` | new kWh (87), same row counts |
+| G25 | Rebuild twice | `test_rebuilding_a_day_twice_gives_identical_gold` | md5 unchanged |
+
 ## Deliberately failing test (CI proof)
 Keep one test that fails on a known-broken input to prove CI turns red.
 `tests/test_deliberately_failing.py` is `@pytest.mark.skip`; unskip ⇒ suite goes red.

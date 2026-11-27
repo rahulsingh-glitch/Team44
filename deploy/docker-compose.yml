@@ -29,9 +29,19 @@ x-airflow-common: &airflow-common
     # The password is pinned by the bind-mounted passwords file below, so Airflow
     # does NOT generate a random one. (Dev only — plaintext; see runbook.)
     AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "admin:admin"
-    _PIP_ADDITIONAL_REQUIREMENTS: ""
+    _PIP_ADDITIONAL_REQUIREMENTS: ""   # psycopg 3 ships in the image already
+    # --- GridPulse pipeline code + landing (DAGs import src.*) --------------
+    PYTHONPATH: /opt/airflow/gridpulse
+    WAREHOUSE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@warehouse:5432/${POSTGRES_DB:-lakehouse}
+    GRIDPULSE_LANDING: /opt/airflow/gridpulse/data/landing
+    ALERT_DQ_PASS_RATE_MIN: ${ALERT_DQ_PASS_RATE_MIN:-0.98}
+    ALERT_COMPLETENESS_MIN_PCT: ${ALERT_COMPLETENESS_MIN_PCT:-90}
+    ALERT_COMPLETENESS_DROP_PTS: ${ALERT_COMPLETENESS_DROP_PTS:-2.0}
+    DQ_GATE: ${DQ_GATE:-enforce}
   volumes:
     - ../dags:/opt/airflow/dags
+    - ../src:/opt/airflow/gridpulse/src:ro
+    - ../data:/opt/airflow/gridpulse/data:ro
     - airflow-logs:/opt/airflow/logs
     - ../deploy/airflow/simple_auth_manager_passwords.json.generated:/opt/airflow/simple_auth_manager_passwords.json.generated
   user: "${AIRFLOW_UID:-50000}:0"

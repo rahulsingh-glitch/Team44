@@ -32,7 +32,7 @@ After `make up`:
 | Airflow | http://localhost:8080 | admin / admin |
 | Superset | http://localhost:8088 | admin / admin |
 | Warehouse (Postgres 18) | `postgresql://localhost:5432/lakehouse` | postgres / postgres (dev) |
-| Health page | http://localhost:8000/health | served by the observability layer (added in a later session) |
+| Health page | http://localhost:8000/health | `make health` (stdlib server, `src/observability/health.py`) |
 
 Schemas created: `bronze, silver, gold, mart, obs, ref`.
 
@@ -49,23 +49,48 @@ Schemas created: `bronze, silver, gold, mart, obs, ref`.
 
 ## 2. Run the pipeline
 ```bash
-make run                                   # one day
-make backfill DATE_FROM=2025-01-01 DATE_TO=2025-01-07
+make run                                   # one day (CLI)
+make backfill DATE_FROM=2025-09-01 DATE_TO=2025-09-03
 ```
+**Airflow** (http://localhost:8080, admin/admin) — `gridpulse_pipeline` runs
+`land → bronze → silver → dq → consumption → anomaly → publish`, calling the SAME stage
+functions as the CLI (identical output). Both DAGs are created **paused**.
+```bash
+make dag-test DATE=2025-09-03                              # one date, in-process
+make airflow-backfill DATE_FROM=2025-09-01 DATE_TO=2025-09-03   # one run per date, in order
+```
+Range in ONE run: trigger `gridpulse_pipeline` with config `{"date_from": "...", "date_to": "..."}`.
+Retries: 2 × 2 min (late landing files); DQ gate failure does **not** retry.
+`gridpulse_maintenance` (daily): retention (data clock, or `as_of` param; `dry_run`) →
+VACUUM + REINDEX CONCURRENTLY of the last 3 days.
 
 ## 3. Where to look when something breaks (DETECT)
-- Dashboard DQ scorecard: <<url>>
-- Health page: http://localhost:8000/health
+- Dashboard: http://localhost:8088/superset/dashboard/gridpulse/ (admin/admin) — tabs: Feeder
+  consumption · Anomalies · Data completeness (DQ scorecard) · Pipeline health; Zone filter.
+  (Re)build: `make dashboard` (mart.* views + Superset API upsert + chart-query verify).
+- Health page: http://localhost:8000/health (`make health`) — `ok` 200 / `degraded` 200
+  (alert firing) / `down` 503 (DB unreachable or last pipeline run failed; `last_run.error` says why)
 - Airflow UI (task failures): http://localhost:8080
-- Tables: `run_log`, `metrics`, `quarantine`
+- Tables: `obs.run_log` (one row per stage per run, `status`, `duration_s`, `error`),
+  `obs.metrics` (completeness_pct per zone+ALL, duplicate_rate, ingest_lag_s, quarantine_count,
+  readings, run_duration_s), `obs.alert`, `silver.quarantine`
+- Alert: `COMPLETENESS_DROP` — printed as an `ALERT ...` line on stderr and stored in `obs.alert`.
+  Fires per zone/ALL when completeness < `ALERT_COMPLETENESS_MIN_PCT` (90) or drops >
+  `ALERT_COMPLETENESS_DROP_PTS` (2.0) below the previous-7-day mean.
+- Quick queries:
+  `SELECT stage, metric_date, status, error FROM obs.run_log WHERE status <> 'success' ORDER BY started_at DESC LIMIT 10;`
+  `SELECT metric_date, scope, value, baseline, evidence->'worst_feeders' FROM obs.alert ORDER BY fired_at DESC;`
 
 ## 4. Common incidents (TRIAGE → FIX)
 | Symptom | Likely cause | Fix | Verify |
 |---|---|---|---|
 | DQ pass-rate drops | source schema change / bad values | <<...>> | re-check scorecard |
 | Day double-counts | re-delivered file not skipped | check checksum ledger | row counts stable on re-run |
+| `ALERT COMPLETENESS_DROP` (zone) | feeder outage / late or missing landing file / quarantine spike | read `evidence.worst_feeders`; check `gold.anomaly` OUTAGE for that feeder+date and `silver.quarantine` counts; if files were late, `make backfill DATE_FROM=D DATE_TO=D` | completeness_pct for the zone back within 2 pts of baseline; alert row gone after re-run |
+| `/health` = 503 `down` | last pipeline run failed (or DB down) | `obs.run_log` failed row → `error` + `stage`; fix, re-run the date | `/health` back to 200 |
 | Freshness alert | late/missing source file | run backfill for the date | freshness lag clears |
-| DAG task retries then fails | <<...>> | <<...>> | task green in Airflow |
+| DAG `land` retries then fails | landing files for the date are late/missing (`FileNotFoundError: no landing files for [...]`) | wait for / re-deliver the files, then clear the task (or `make dag-test DATE=D`) | task green; `/health` back to 200 |
+| DAG `dq` fails, no retry | DQ gate: `dq_pass_rate` < `ALERT_DQ_PASS_RATE_MIN` or an invariant FAIL | `SELECT * FROM obs.dq_results WHERE check_date=D AND status<>'PASS'`; fix the source/silver rule, re-run; `DQ_GATE=warn` only as a conscious override | all checks PASS; gold rebuilt |
 
 ## 5. SRE drill procedure (3:30)
 1. **Detect** the symptom in our own dashboard/alert (not from the mentor).
