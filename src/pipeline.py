@@ -1,7 +1,7 @@
 """Pipeline entry point: run one day or backfill a range.
 
-Medallion steps are wired here as each layer lands. Currently: bronze landing.
-Later layers (silver -> dq -> gold -> marts) extend `run`.
+Medallion steps wired so far: ref.dim_meter -> bronze landing -> silver
+normalisation. Later layers (dq -> gold -> anomaly) extend `_run_dates`.
 """
 
 from __future__ import annotations
@@ -10,54 +10,67 @@ import argparse
 import datetime as dt
 from pathlib import Path
 
-from src.bronze.load import load_all, load_date, new_run_id
+from src.bronze.load import discover_dates, load_date, new_run_id
 from src.common.db import connect
+from src.ref.dim_meter import load_dim_meter
+from src.silver.load import build_silver_date
 
 LANDING = Path("data/landing")
+BRONZE_KEYS = ("loaded", "skipped_duplicate", "unparseable", "rows")
 
 
-def _print_summary(stage: str, summary: dict) -> None:
+def _print_bronze(stage: str, s: dict) -> None:
     print(
-        f"[{stage}] run_id={summary['run_id']} "
-        f"loaded={summary['loaded']} skipped_duplicate={summary['skipped_duplicate']} "
-        f"unparseable={summary['unparseable']} rows={summary['rows']}"
+        f"[{stage}] run_id={s['run_id']} loaded={s['loaded']} "
+        f"skipped_duplicate={s['skipped_duplicate']} unparseable={s['unparseable']} "
+        f"rows={s['rows']}"
     )
 
 
-def run(date: str, landing: Path = LANDING) -> dict:
-    """Run the pipeline for one date (or 'all' landing dates). Bronze for now."""
-    run_id = new_run_id()
+def _print_silver(s: dict) -> None:
+    print(
+        f"[silver] date={s['date']} readings={s['readings']} "
+        f"quarantined={s['quarantined']} {s['reasons']} "
+        f"gaps={s['gaps']} missing_intervals={s['missing_intervals']}"
+    )
+
+
+def _run_dates(dates: list[str], landing: Path, stage: str) -> dict:
+    run_id = new_run_id("run")
+    totals = {"run_id": run_id, **{k: 0 for k in BRONZE_KEYS}, "silver": []}
     with connect() as conn:
-        if date == "all":
-            summary = load_all(conn, landing, run_id)
-        else:
-            resolved = dt.date.today().isoformat() if date == "today" else date
-            summary = load_date(conn, landing, resolved, run_id)
-    _print_summary("bronze", summary)
-    return summary
+        load_dim_meter(conn, landing / "_master" / "dim_meter.csv")
+        # bronze first for every date, so silver sees late/adjacent files
+        for d in dates:
+            s = load_date(conn, landing, d, run_id)
+            for k in BRONZE_KEYS:
+                totals[k] += s[k]
+        _print_bronze(stage, totals)
+        for d in dates:
+            s = build_silver_date(conn, d, run_id)
+            totals["silver"].append(s)
+            _print_silver(s)
+    return totals
+
+
+def run(date: str, landing: Path = LANDING) -> dict:
+    """Run the pipeline for one date, or 'all' landing dates."""
+    if date == "all":
+        dates = discover_dates(landing)
+    else:
+        dates = [dt.date.today().isoformat() if date == "today" else date]
+    return _run_dates(dates, landing, "bronze")
 
 
 def backfill(date_from: str, date_to: str, landing: Path = LANDING) -> dict:
-    """Land every date in [date_from, date_to]."""
+    """Re-run every date in [date_from, date_to] (silver replaces each date)."""
     start = dt.date.fromisoformat(date_from)
     end = dt.date.fromisoformat(date_to)
-    run_id = new_run_id()
-    totals = {
-        "run_id": run_id,
-        "loaded": 0,
-        "skipped_duplicate": 0,
-        "unparseable": 0,
-        "rows": 0,
-    }
-    with connect() as conn:
-        day = start
-        while day <= end:
-            s = load_date(conn, landing, day.isoformat(), run_id)
-            for k in ("loaded", "skipped_duplicate", "unparseable", "rows"):
-                totals[k] += s[k]
-            day += dt.timedelta(days=1)
-    _print_summary("bronze-backfill", totals)
-    return totals
+    dates = [
+        (start + dt.timedelta(days=i)).isoformat()
+        for i in range((end - start).days + 1)
+    ]
+    return _run_dates(dates, landing, "bronze-backfill")
 
 
 def main() -> None:
