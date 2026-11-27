@@ -1,0 +1,14 @@
+# Place at .github/workflows/ci.yml in the real repo.
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.13" }
+      - run: pip install -r requirements.txt
+      - run: ruff check src tests && black --check src tests
+      - run: pytest -q
+      # The deliberately-failing test proves the pipeline turns red.

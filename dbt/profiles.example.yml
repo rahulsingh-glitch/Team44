@@ -1,0 +1,7 @@
+# Copy to ~/.dbt/profiles.yml. DuckDB path = zero containers for the engine.
+omniretail:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: lakehouse.duckdb

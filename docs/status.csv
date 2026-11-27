@@ -1,0 +1,12 @@
+task_id,component,owner,state,depends_on,branch,test_state,notes,updated_at
+T0,setup docker stack,Nabi,todo,,,,stand up stack + schemas,
+T1,synthetic data,Jitesh,todo,T0,,,generator + 5 planted defects,
+T2,bronze,Jitesh,todo,T1,,,land + load_log + checksum skip,
+T3,silver,Jitesh,todo,T2,,,typed/dedup/quarantine,
+T4,gold dims incl SCD2,Adarsh,todo,T3,,,dim_product SCD2,
+T5,gold fact idempotent,Adarsh,todo,T4,,,fact_sales merge,
+T6,marts,Adarsh,todo,T5,,,2 marts,
+T7,data quality,Chetan,todo,T3,,,dq_pass_rate -> obs.metrics,
+T8,observability+alert,Nabi,todo,T0,,,run_log/metrics/health/alert,
+T9,airflow dag,Nabi,todo,T6,,,deps/retries/backfill,
+T10,dashboard,Chetan,todo,T6,,,5 tiles + DQ scorecard,

@@ -1,0 +1,2 @@
+# Airflow DAGs live here (mounted into every Airflow container at /opt/airflow/dags).
+# The orchestration builder adds the GridPulse pipeline DAG in a later session.

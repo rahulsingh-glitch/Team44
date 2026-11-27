@@ -1,0 +1,11 @@
+name: omniretail
+version: "1.0"
+profile: omniretail
+model-paths: ["models"]
+snapshot-paths: ["snapshots"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+models:
+  omniretail:
+    staging: { +materialized: view }
+    marts: { +materialized: table }

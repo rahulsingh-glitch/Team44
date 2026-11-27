@@ -1,0 +1,12 @@
+# Pin on the day to the versions in the prereqs doc.
+duckdb
+dbt-duckdb
+psycopg[binary]
+sqlalchemy
+pandas
+faker
+great-expectations
+pytest
+black
+ruff
+streamlit

@@ -1,0 +1,17 @@
+WHY THIS FOLDER EXISTS
+Claude Code reads its config from a hidden ".claude" folder. Some Windows unzip tools
+drop hidden/dot-folders, so we also ship the SAME files here in a visible "claude-setup"
+folder. Run ONE install script below to create the real ".claude" folder from these.
+
+WINDOWS (PowerShell), from the repo root:
+    .\install-claude-config.ps1
+
+MAC / LINUX / WSL (bash), from the repo root:
+    bash install-claude-config.sh
+
+After running it, launch Claude Code from the repo root (claude), type "/", and you
+should see: setup-stack, build-layer, test-feature, grill, ship, gates, rca,
+verify-e2e, logprompt, syncboard.
+
+The agents are in claude-setup/agents/ and the commands in claude-setup/commands/ —
+open them in any text editor to read them.

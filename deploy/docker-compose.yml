@@ -1,0 +1,192 @@
+# GridPulse — full local stack (Team 44, Track B).
+#   warehouse        Postgres 18  : the data warehouse (bronze/silver/gold/mart/obs/ref)
+#   airflow-*        Airflow 3.3  : orchestration (LocalExecutor, no Celery/Redis)
+#   superset         Superset     : dashboard
+#
+# One-command start:  make up   (see deploy/Makefile)
+# Secrets come from ./.env (git-ignored); ./.env.example documents every key.
+#
+# Hard constraints baked in (see docs/runbook.md):
+#  * Postgres 18 volume is mounted at /var/lib/postgresql (NOT .../data) — PG18
+#    reserves the /data subpath for its versioned dirs and refuses to boot otherwise.
+#  * Airflow 3 login is pinned to admin/admin via a committed, bind-mounted
+#    simple_auth_manager_passwords.json.generated — survives down/up and nuke.
+
+# Fixed project name so volumes/containers are predictable (gridpulse_*) and
+# never collide with another compose project named after the deploy/ folder.
+name: gridpulse
+
+x-airflow-common: &airflow-common
+  image: apache/airflow:3.3.1
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-postgres:5432/airflow
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY:-}
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: "http://airflow-apiserver:8080/execution/"
+    # SimpleAuthManager is the Airflow 3 default; make the admin user explicit.
+    # The password is pinned by the bind-mounted passwords file below, so Airflow
+    # does NOT generate a random one. (Dev only — plaintext; see runbook.)
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "admin:admin"
+    _PIP_ADDITIONAL_REQUIREMENTS: ""
+  volumes:
+    - ../dags:/opt/airflow/dags
+    - airflow-logs:/opt/airflow/logs
+    - ../deploy/airflow/simple_auth_manager_passwords.json.generated:/opt/airflow/simple_auth_manager_passwords.json.generated
+  user: "${AIRFLOW_UID:-50000}:0"
+  depends_on:
+    airflow-postgres:
+      condition: service_healthy
+
+services:
+  # ---------------------------------------------------------------- warehouse
+  warehouse:
+    image: postgres:18
+    container_name: gridpulse-warehouse
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-lakehouse}
+    ports:
+      - "${WAREHOUSE_PORT:-5432}:5432"
+    volumes:
+      - warehouse-data:/var/lib/postgresql
+      # Runs ONLY on first init (empty volume); `make up` also re-applies it
+      # idempotently so schemas exist even after the first boot.
+      - ../scripts/init-schemas.sql:/docker-entrypoint-initdb.d/10-init-schemas.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-lakehouse}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # ---------------------------------------------------- airflow metadata DB
+  airflow-postgres:
+    image: postgres:16
+    container_name: gridpulse-airflow-postgres
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow-pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # ------------------------------------------------------------ airflow init
+  airflow-init:
+    <<: *airflow-common
+    container_name: gridpulse-airflow-init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        mkdir -p /opt/airflow/logs /opt/airflow/dags /opt/airflow/config
+        airflow db migrate
+        echo "[airflow-init] DB migrated. Login: admin / admin"
+    restart: on-failure
+
+  # ------------------------------------------------------- airflow apiserver
+  airflow-apiserver:
+    <<: *airflow-common
+    container_name: gridpulse-airflow-apiserver
+    command: api-server
+    ports:
+      - "${AIRFLOW_PORT:-8080}:8080"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/api/v2/version"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+    restart: unless-stopped
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: gridpulse-airflow-scheduler
+    command: scheduler
+    # The :8974 health server is off by default in Airflow 3; use jobs check,
+    # which reports liveness directly from the metadata DB.
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}"']
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 60s
+    restart: unless-stopped
+    depends_on:
+      airflow-postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: gridpulse-airflow-dag-processor
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow-common
+    container_name: gridpulse-airflow-triggerer
+    command: triggerer
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type TriggererJob --hostname "$${HOSTNAME}"']
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  # ----------------------------------------------------------------- superset
+  superset:
+    image: apache/superset:4.1.1
+    container_name: gridpulse-superset
+    environment:
+      SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY:-gridpulse-dev-secret-change-me}
+      SUPERSET_ADMIN_USER: ${SUPERSET_ADMIN_USER:-admin}
+      SUPERSET_ADMIN_PASSWORD: ${SUPERSET_ADMIN_PASSWORD:-admin}
+      SUPERSET_ADMIN_EMAIL: ${SUPERSET_ADMIN_EMAIL:-admin@example.com}
+      SUPERSET_LOAD_EXAMPLES: "no"
+    ports:
+      - "${SUPERSET_PORT:-8088}:8088"
+    volumes:
+      - superset-home:/app/superset_home
+      - ../deploy/superset/superset-init.sh:/app/superset-init.sh:ro
+    command: ["bash", "/app/superset-init.sh"]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8088/health"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 90s
+    restart: unless-stopped
+
+volumes:
+  warehouse-data:
+  airflow-pg-data:
+  airflow-logs:
+  superset-home:

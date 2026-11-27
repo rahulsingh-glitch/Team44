@@ -1,0 +1,12 @@
+# dbt tests map straight onto the DQ rules (uniqueness, not-null, relationships).
+version: 2
+sources:
+  - name: silver
+    schema: silver
+    tables:
+      - name: product
+models:
+  - name: stg_product
+    columns:
+      - name: product_id
+        tests: [not_null, unique]
